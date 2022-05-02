@@ -4,18 +4,20 @@
 #include <LiquidCrystal.h>
 
 // Define pins
+#define FIVE_VOLT_OUTPUT_PIN 1
 #define LRD_INPUT_PIN A0
 #define POT_INPUT_PIN A1
 #define BTN_INPUT_PIN A2
 #define LED1_OUTPUT_PIN 9
 #define LED2_OUTPUT_PIN 10
 #define LCD_RS_PIN 12
-#define LCD_E_PIN 11
+#define LCD_E_PIN 13
 #define LCD_D4_PIN 5
 #define LCD_D5_PIN 4
 #define LCD_D6_PIN 3
 #define LCD_D7_PIN 2
 #define LCD_CONTRAST_PIN 6
+#define LCD_BACKLIGHT_PIN 11
 
 // Behaviour defs
 #define POT_THRESHOLD 5 // %
@@ -24,57 +26,83 @@
 #define BUTTON_LONG_DELAY 500 // ms
 #define LCD_SLEEP_DELAY 30 // seconds
 #define LCD_UPDATE_DELAY 750 // ms
-#define LED_STEP_DELAY 25 // ms
 
 // Config enum definitions
 enum LEDMode {
   LEDInit,
   LEDOff,
   LEDOn,
-  LEDAutoLightLevel
+  LEDOnFade,
+  LEDOnStrobe,
+  LEDLightLevel,
+  LEDLightLevelFade,
+  LEDLightLevelFadeInOut
 };
-char* LEDModeNames[] = { "Init", "Off", "On", "Auto LL" };
+char* LEDModeNames[] = { "Init", "Off", "On", "On Fade", "On Strobe", "Auto", "Auto Fade" "Auto Fade*" };
 
 // Config definition
-#define CONFIG_VERSION "V3"
+#define CONFIG_VERSION "V5"
 typedef struct
 {
   char version[5];
   unsigned int lcd_contrast;
+  unsigned int lcd_brightness;
   LEDMode operationMode;
   unsigned int led_brightness;
   unsigned int led_min_brightness;
   double light_level;
+  unsigned int fade_step;
 } configuration_type;
 
 // Global configuration instance
 configuration_type CONFIGURATION = {
   CONFIG_VERSION,
   125,
-  LEDAutoLightLevel,
+  255,
+  LEDLightLevelFadeInOut,
   255,
   15,
-  30.0
+  25.0,
+  25
 };
 
 // Define lcd
 enum MenuScreens {
   InitScreen,
   StartScreen,
-  ContrastScreen,
+  LCDContrastScreen,
+  LCDBrightnessScreen,
   BrightnessScreen,
   MinBrightnessScreen,
-  LightLevelScreen
+  LightLevelScreen,
+  FadeStepScreen
 };
 LiquidCrystal lcd(LCD_RS_PIN, LCD_E_PIN, LCD_D4_PIN, LCD_D5_PIN, LCD_D6_PIN, LCD_D7_PIN);
 
 // Global variables
+bool lcdOn = false;
+bool editingSettings = false;
+unsigned long lastUserAction = millis();
 LEDMode operationMode;
 MenuScreens lcdScreen = StartScreen;
-bool editingSettings = false;
 
 char* getOperationModeName() {
-  return LEDModeNames[operationMode];
+  if(operationMode == LEDOff) {
+    return "Off";
+  } else if(operationMode == LEDOn) {
+    return "On";
+  } else if(operationMode == LEDOnFade) {
+    return "On(Fade)";
+  } else if(operationMode == LEDOnStrobe) {
+    return "On(Strobe)";
+  } else if(operationMode == LEDLightLevel) {
+    return "Auto(LL)";
+  } else if(operationMode == LEDLightLevelFade) {
+    return "Auto(LLF)";
+  } else if(operationMode == LEDLightLevelFadeInOut) {
+    return "Auto(LLFIO)";
+  }
+  return "Init";
 }
 
 double getLightLevelPercentage() {
@@ -135,7 +163,15 @@ LEDMode getNextMode() {
   if(operationMode == LEDInit || operationMode == LEDOff) {
     return LEDOn;
   } else if(operationMode == LEDOn) {
-    return LEDAutoLightLevel;
+    return LEDOnFade;
+  } else if(operationMode == LEDOnFade) {
+    return LEDOnStrobe;
+  } else if(operationMode == LEDOnStrobe) {
+    return LEDLightLevel;
+  } else if(operationMode == LEDLightLevel) {
+    return LEDLightLevelFade;
+  } else if(operationMode == LEDLightLevelFade) {
+    return LEDLightLevelFadeInOut;
   }
   return LEDOff;
 }
@@ -143,28 +179,36 @@ LEDMode getNextMode() {
 MenuScreens getPrevScreen() {
   if(lcdScreen == InitScreen || lcdScreen == StartScreen) {
     return LightLevelScreen;
-  } else if(lcdScreen == ContrastScreen) {
+  } else if(lcdScreen == LCDContrastScreen) {
     return StartScreen;
+  } else if(lcdScreen == LCDBrightnessScreen) {
+    return LCDContrastScreen;
   } else if(lcdScreen == BrightnessScreen) {
-    return ContrastScreen;
+    return LCDBrightnessScreen;
   } else if(lcdScreen == MinBrightnessScreen) {
     return BrightnessScreen;
   } else if(lcdScreen == LightLevelScreen) {
     return MinBrightnessScreen;
+  } else if(lcdScreen == FadeStepScreen) {
+    return LightLevelScreen;
   } 
   return InitScreen;
 }
 
 MenuScreens getNextScreen() {
   if(lcdScreen == InitScreen || lcdScreen == StartScreen) {
-    return ContrastScreen;
-  } else if(lcdScreen == ContrastScreen) {
+    return LCDContrastScreen;
+  } else if(lcdScreen == LCDContrastScreen) {
+    return LCDBrightnessScreen;
+  } else if(lcdScreen == LCDBrightnessScreen) {
     return BrightnessScreen;
   } else if(lcdScreen == BrightnessScreen) {
     return MinBrightnessScreen;
   } else if(lcdScreen == MinBrightnessScreen) {
     return LightLevelScreen;
   } else if(lcdScreen == LightLevelScreen) {
+    return FadeStepScreen;
+  } else if(lcdScreen == FadeStepScreen) {
     return StartScreen;
   } 
   return InitScreen;
@@ -201,6 +245,7 @@ void onButtonShortPress() {
     // Update the mode
     operationMode = CONFIGURATION.operationMode;
   }
+  lastUserAction = millis();
 }
 
 void onButtonLongPress() {
@@ -210,6 +255,7 @@ void onButtonLongPress() {
   } else {
     editingSettings = true;
   }
+  lastUserAction = millis();
 }
 
 void processButton() {
@@ -263,14 +309,18 @@ void processPotentiometer() {
   static unsigned long lastPotAction = millis();
 
   if(editingSettings) {
-    if(lcdScreen == ContrastScreen) {
+    if(lcdScreen == LCDContrastScreen) {
       CONFIGURATION.lcd_contrast = ((getPotPercentage() / 100.0) * 255);
+    } else if(lcdScreen == LCDBrightnessScreen) {
+      CONFIGURATION.lcd_brightness = ((getPotPercentage() / 100.0) * 255);
     } else if(lcdScreen == BrightnessScreen) {
       CONFIGURATION.led_brightness = ((getPotPercentage() / 100.0) * 255);
     } else if(lcdScreen == MinBrightnessScreen) {
       CONFIGURATION.led_min_brightness = ((getPotPercentage() / 100.0) * 255);
     } else if(lcdScreen == LightLevelScreen) {
       CONFIGURATION.light_level = getPotPercentage();
+    } else if(lcdScreen == FadeStepScreen) {
+      CONFIGURATION.fade_step = ((getPotPercentage() / 100.0) * 1000);
     }
     lastPotValue = getPotPercentage();
     lastPotAction = millis();
@@ -280,10 +330,12 @@ void processPotentiometer() {
         onPotUp();
         lastPotValue = getPotPercentage();
         lastPotAction = millis();
+        lastUserAction = millis();
       } else if(getPotPercentage() <= (lastPotValue - POT_THRESHOLD)) {
         onPotDown();
         lastPotValue = getPotPercentage();
         lastPotAction = millis();
+        lastUserAction = millis();
       }
     }
   }
@@ -313,7 +365,7 @@ void processLEDs() {
     analogWrite(LED1_OUTPUT_PIN, CONFIGURATION.led_brightness);
     analogWrite(LED2_OUTPUT_PIN, CONFIGURATION.led_brightness);
     lastBrightness = CONFIGURATION.led_brightness;
-  } else if(operationMode == LEDAutoLightLevel) {
+  } else if(operationMode == LEDLightLevelFade) {
     if(getLightLevelPercentage() <= CONFIGURATION.light_level) {
       if(currentBrightness != lastBrightness) {
         analogWrite(LED1_OUTPUT_PIN, currentBrightness);
@@ -327,7 +379,7 @@ void processLEDs() {
     }
 
     // Step the LED brightness
-    if(millis() > (lastStep + LED_STEP_DELAY)) {
+    if(millis() > (lastStep + CONFIGURATION.fade_step)) {
       currentBrightness += step;
       if(currentBrightness >= CONFIGURATION.led_brightness || currentBrightness <= CONFIGURATION.led_min_brightness) {
         step *= -1;
@@ -340,7 +392,7 @@ void processLEDs() {
 void updateLCD() {
   static MenuScreens lastScreen = InitScreen;
   static unsigned long lastUpdate = millis();
-  static unsigned int lastContrast = -1, currentContrast = 150;
+  static unsigned int lastContrast = -1, currentContrast = CONFIGURATION.lcd_contrast, lastBrightness = -1, currentBrightness = CONFIGURATION.lcd_brightness;
 
   // Update the lcd screen
   if(lastScreen != lcdScreen) {
@@ -358,11 +410,16 @@ void updateLCD() {
       lcd.print("Light: ");
       lcd.print(getLightLevelPercentage());
       lcd.print("%");
-    } else if(lcdScreen == ContrastScreen) {
+    } else if(lcdScreen == LCDContrastScreen) {
       lcd.setCursor(0, 0);
       lcd.print("LCD Contrast");
       lcd.setCursor(0, 1);
       lcd.print(currentContrast);
+    } else if(lcdScreen == LCDBrightnessScreen) {
+      lcd.setCursor(0, 0);
+      lcd.print("LCD Brightness");
+      lcd.setCursor(0, 1);
+      lcd.print(currentBrightness);
     } else if(lcdScreen == BrightnessScreen) {
       lcd.setCursor(0, 0);
       lcd.print("LED Max");
@@ -382,6 +439,11 @@ void updateLCD() {
       lcd.print(getLightLevelPercentage());
       lcd.print("%");
       lcd.print(")");
+    } else if(lcdScreen == FadeStepScreen) {
+      lcd.setCursor(0, 0);
+      lcd.print("Step (ms)");
+      lcd.setCursor(0, 1);
+      lcd.print(CONFIGURATION.fade_step);
     }
 
     // Update control variables
@@ -408,7 +470,7 @@ void updateLCD() {
       lcd.setCursor(7, 1);
       lcd.print(getLightLevelPercentage());
       lcd.print("%");
-    } else if(lcdScreen == ContrastScreen) {
+    } else if(lcdScreen == LCDContrastScreen) {
       lcd.setCursor(0, 1);
       for(int i = 0; i < 16; i++) {
         lcd.setCursor(i, 1);
@@ -416,6 +478,14 @@ void updateLCD() {
       }
       lcd.setCursor(0, 1);
       lcd.print(currentContrast);
+    } else if(lcdScreen == LCDBrightnessScreen) {
+      lcd.setCursor(0, 1);
+      for(int i = 0; i < 16; i++) {
+        lcd.setCursor(i, 1);
+        lcd.write(254);
+      }
+      lcd.setCursor(0, 1);
+      lcd.print(currentBrightness);
     } else if(lcdScreen == BrightnessScreen) {
       lcd.setCursor(0, 1);
       for(int i = 0; i < 16; i++) {
@@ -444,6 +514,14 @@ void updateLCD() {
       lcd.print(getLightLevelPercentage());
       lcd.print("%");
       lcd.print(")");
+    } else if(lcdScreen == FadeStepScreen) {
+      lcd.setCursor(0, 1);
+      for(int i = 0; i < 16; i++) {
+        lcd.setCursor(i, 1);
+        lcd.write(254);
+      }
+      lcd.setCursor(0, 1);
+      lcd.print(CONFIGURATION.fade_step);
     }
     lastUpdate = millis();
   }
@@ -457,6 +535,27 @@ void updateLCD() {
   if(lastContrast != currentContrast) {
     lastContrast = currentContrast;
     analogWrite(LCD_CONTRAST_PIN, lastContrast);
+  }
+
+  // Update the brightness
+  if(currentBrightness != CONFIGURATION.lcd_brightness) {
+    currentBrightness = CONFIGURATION.lcd_brightness;
+  }
+
+  // Output updated brightness
+  if(lastBrightness != currentBrightness) {
+    lastBrightness = currentBrightness;
+    analogWrite(LCD_BACKLIGHT_PIN, lastBrightness);
+  }
+
+  // Turn the LCD off/on
+  unsigned long lcdSleep = lastUserAction + ((long)LCD_SLEEP_DELAY * 1000);
+  if(millis() >= lcdSleep && lcdOn) {
+    digitalWrite(LCD_BACKLIGHT_PIN, LOW);
+    lcdOn = false;
+  } else if(millis() < lcdSleep && !lcdOn) {
+    analogWrite(LCD_BACKLIGHT_PIN, currentBrightness);
+    lcdOn = true;
   }
 }
 
@@ -489,10 +588,13 @@ void setup() {
   lcd.begin(16,2);
 
   // Initialize pins
+  pinMode(FIVE_VOLT_OUTPUT_PIN, OUTPUT);
+  digitalWrite(FIVE_VOLT_OUTPUT_PIN, HIGH); // Output 5v
   pinMode(LRD_INPUT_PIN, INPUT);
   pinMode(POT_INPUT_PIN, INPUT);
   pinMode(BTN_INPUT_PIN, INPUT_PULLUP);
   pinMode(LED1_OUTPUT_PIN, OUTPUT);
   pinMode(LED2_OUTPUT_PIN, OUTPUT);
   pinMode(LCD_CONTRAST_PIN, OUTPUT);
+  pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
 }
